@@ -1,7 +1,6 @@
 # Prediction interface for Cog ⚙️
 # https://cog.run/python
 
-
 import os
 import io
 import time
@@ -12,20 +11,19 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 import supervision as sv
-from typing import Iterator
+from typing import Iterator, Tuple, List, Dict
 import matplotlib.pyplot as plt
 from cog import BasePredictor, Input, Path
 from contextlib import contextmanager
 import shutil
 import tempfile
+from typing import Any
 
 mimetypes.add_type("image/webp", ".webp")
-
 
 DEVICE = "cuda"
 MODEL_CACHE = "checkpoints"
 BASE_URL = f"https://weights.replicate.delivery/default/sam-2/{MODEL_CACHE}/"
-
 
 def download_weights(url: str, dest: str) -> None:
     start = time.time()
@@ -43,7 +41,6 @@ def download_weights(url: str, dest: str) -> None:
         )
         raise
     print("[+] Download completed in: ", time.time() - start, "seconds")
-
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
@@ -159,7 +156,7 @@ class Predictor(BasePredictor):
             le=100,
         ),
        
-    ) -> Iterator[Path]:
+    ) -> Dict[str, Any]:
         # Parse inputs
         click_list, click_labels_list, object_ids_int_list = (
             self.parse_inputs(
@@ -191,14 +188,19 @@ class Predictor(BasePredictor):
 
         # Generate and save the result
         annotated_image = self.process_image(image, masks, object_ids_int_list)
-        output_path = output_dir / f"output.webp" #he decidido webp por la compresión sin pérdida de calidad
+        output_path = output_dir / f"output.webp"
 
+        pil_image = Image.fromarray(annotated_image)
+        pil_image.save(output_path, format="WEBP", quality=output_quality)
 
-        image = Image.fromarray(annotated_image)
-        image.save(output_path, format="WEBP", quality=output_quality, )
-    
-        return output_path
-        
+        # Extract contours and normalize coordinates using Supervision
+        normalized_contours = self.extract_contours_using_supervision(masks, (image.shape[0], image.shape[1]))
+
+        return {
+            "output_image": output_path,
+            "contours": normalized_contours
+        }
+
     def process_image(self, image, masks, tracker_ids):
         masks = np.stack(masks).astype(bool)
         detections = sv.Detections(
@@ -213,3 +215,36 @@ class Predictor(BasePredictor):
         )
 
         return annotated_image
+
+    def extract_contours_using_supervision(self, masks: List[np.ndarray], image_shape: Tuple[int, int]) -> List[Dict[str, any]]:
+        """Extracts normalized contour coordinates from masks using Supervision's polygon utilities.
+
+        Args:
+            masks (List[np.ndarray]): List of binary masks.
+            image_shape (Tuple[int, int]): Shape of the image as (height, width).
+
+        Returns:
+            List[Dict[str, any]]: List containing object IDs and their corresponding normalized contours.
+        """
+        contours_info = []
+        height, width = image_shape
+
+        for idx, mask in enumerate(masks):
+            # Convert mask to boolean
+            mask_bool = mask.astype(bool)
+            # Use Supervision's mask_to_polygon to get polygons
+            polygons = sv.mask_to_polygons(mask_bool)
+            normalized_contours = []
+            for polygon in polygons:
+                # Normalize the polygon coordinates
+                normalized_polygon = polygon.tolist()
+                normalized_polygon = [
+                    [point[0] / width, point[1] / height] for point in normalized_polygon
+                ]
+                normalized_contours.append(normalized_polygon)
+            contours_info.append({
+                "object_id": idx + 1,
+                "contours": normalized_contours
+            })
+
+        return contours_info
