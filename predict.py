@@ -38,7 +38,6 @@ def download_weights(url: str, dest: str) -> None:
 class Output(BaseModel):
     video_path: Path
     individual_masks: List[Path]
-    masked_frames: List[Path]
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
@@ -127,9 +126,9 @@ class Predictor(BasePredictor):
         individual_mask_paths = self.save_individual_masks(video_segments)
 
         # Save frames with mask overlay
-        masked_frame_paths = self.save_masked_frames(video_dir, video_segments)
+        #masked_frame_paths = self.save_masked_frames(video_dir, video_segments)
 
-        return Output(video_path=output_video_path, individual_masks=individual_mask_paths, masked_frames=masked_frame_paths)
+        return Output(video_path=output_video_path, individual_masks=individual_mask_paths)
 
     def extract_frames(self, video_path: Path) -> str:
         output_dir = "/tmp/video_frames"
@@ -153,7 +152,7 @@ class Predictor(BasePredictor):
         height, width = first_frame.shape[:2]
         
         out = cv2.VideoWriter(str(output_video_path), fourcc, 30, (width, height))
-        color_mask = np.concatenate([np.random.random(3), [0.35]])
+        #color_mask = np.concatenate([np.random.random(3), [0.35]])
         
         for frame_idx, frame_name in enumerate(frame_names):
             frame_path = os.path.join(video_dir, frame_name)
@@ -168,9 +167,9 @@ class Predictor(BasePredictor):
                         mask = cv2.resize(mask.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
                         mask = mask.astype(bool)
                     
-                    
-                    frame[mask] = frame[mask] * (1 - color_mask[3]) + color_mask[:3] * 255 * color_mask[3]
-                    
+                    frame = frame[mask] #we generate the crop. No overlay anymore
+                    #frame[mask] = frame[mask] * (1 - color_mask[3]) + color_mask[:3] * 255 * color_mask[3]
+
                     out.write(frame)
 
         out.release()
@@ -189,29 +188,4 @@ class Predictor(BasePredictor):
 
         return mask_paths
     
-    def save_masked_frames(self, video_dir: str, video_segments: dict) -> List[Path]:
-        frame_paths = []
-        os.makedirs("/tmp/masked_frames", exist_ok=True)
-        frame_names = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg')])
-        color_mask = np.concatenate([np.random.random(3), [0.35]])
-        for frame_idx, frame_name in enumerate(frame_names):
-            frame_path = os.path.join(video_dir, frame_name)
-            frame = cv2.imread(frame_path)
-            
-            if frame_idx in video_segments:
-                for obj_id, mask in video_segments[frame_idx].items():
-                    # Remove the extra dimension and ensure boolean type
-                    mask = mask.squeeze().astype(bool)
-                    # Ensure mask has the same dimensions as the frame
-                    if mask.shape != frame.shape[:2]:
-                        mask = cv2.resize(mask.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
-                        mask = mask.astype(bool)
-                    
-                    
-                    frame[mask] = frame[mask] * (1 - color_mask[3]) + color_mask[:3] * 255 * color_mask[3]
-            
-            output_path = Path(f"/tmp/masked_frames/frame_{frame_idx:05d}.png")
-            cv2.imwrite(str(output_path), frame)
-            frame_paths.append(output_path)
-        
-        return frame_paths
+    
