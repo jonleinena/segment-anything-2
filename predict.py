@@ -8,8 +8,7 @@ import torch
 import subprocess
 import numpy as np
 from PIL import Image
-from typing import List, Dict
-import matplotlib.pyplot as plt
+from typing import List
 from cog import BasePredictor, Input, Path, BaseModel
 
 from sam2.build_sam import build_sam2_video_predictor
@@ -39,6 +38,7 @@ def download_weights(url: str, dest: str) -> None:
 class Output(BaseModel):
     video_path: Path
     individual_masks: List[Path]
+    masked_frames: List[Path]
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
@@ -70,9 +70,12 @@ class Predictor(BasePredictor):
     def predict(
         self,
         video: Path = Input(description="Input video file"),
-        prompts: Dict[str, List[List[int]]] = Input(
-            description="Dictionary of prompts for each object to track. Format: {'object_id': [[x1, y1, label], [x2, y2, label], ...]}. Label 1 for positive, 0 for negative."
-        ),
+        #prompts: Dict[str, List[List[int]]] = Input(
+        #    description="Dictionary of prompts for each object to track. Format: {'object_id': [[x1, y1, label], [x2, y2, label], ...]}. Label 1 for positive, 0 for negative."
+        #),
+        points: str = Input(description="Comma-separated list of x,y coordinates for positive points"),
+        negative_points: str = Input(description="Comma-separated list of x,y coordinates for negative points", default=""),
+        object_id: int = Input(description="Unique ID for the object to be tracked", default=1)
     ) -> Output:
         """Run a single prediction on the model"""
         # Extract frames from video
@@ -82,16 +85,32 @@ class Predictor(BasePredictor):
         inference_state = self.predictor.init_state(video_path=video_dir)
 
         # Process user prompts
-        for obj_id, obj_prompts in prompts.items():
-            points = np.array([[p[0], p[1]] for p in obj_prompts], dtype=np.float32)
-            labels = np.array([p[2] for p in obj_prompts], dtype=np.int32)
-            self.predictor.add_new_points(
-                inference_state=inference_state,
-                frame_idx=0,  # Assume all prompts are on the first frame
-                obj_id=int(obj_id),
-                points=points,
-                labels=labels,
-            )
+        # for obj_id, obj_prompts in prompts.items():
+        #     points = np.array([[p[0], p[1]] for p in obj_prompts], dtype=np.float32)
+        #     labels = np.array([p[2] for p in obj_prompts], dtype=np.int32)
+        #     self.predictor.add_new_points(
+        #         inference_state=inference_state,
+        #         frame_idx=0,  # Assume all prompts are on the first frame
+        #         obj_id=int(obj_id),
+        #         points=points,
+        #         labels=labels,
+        #     )
+        # Process input points
+        pos_points = np.array([list(map(float, p.split(','))) for p in points.split()], dtype=np.float32)
+        neg_points = np.array([list(map(float, p.split(','))) for p in negative_points.split()] if negative_points else [], dtype=np.float32)
+        
+        # Combine points and labels
+        all_points = np.vstack([pos_points, neg_points]) if len(neg_points) > 0 else pos_points
+        labels = np.array([1] * len(pos_points) + [0] * len(neg_points), dtype=np.int32)
+
+        # Add points and get initial mask
+        _, _, _ = self.predictor.add_new_points(
+            inference_state=inference_state,
+            frame_idx=0,
+            obj_id=object_id,
+            points=all_points,
+            labels=labels,
+        )
 
         # Propagate prompts and generate masks for each frame
         video_segments = {}
@@ -107,7 +126,10 @@ class Predictor(BasePredictor):
         # Save individual masks
         individual_mask_paths = self.save_individual_masks(video_segments)
 
-        return Output(video_path=output_video_path, individual_masks=individual_mask_paths)
+        # Save frames with mask overlay
+        masked_frame_paths = self.save_masked_frames(video_dir, video_segments)
+
+        return Output(video_path=output_video_path, individual_masks=individual_mask_paths, masked_frames=masked_frame_paths)
 
     def extract_frames(self, video_path: Path) -> str:
         output_dir = "/tmp/video_frames"
@@ -122,24 +144,34 @@ class Predictor(BasePredictor):
         return output_dir
 
     def create_output_video(self, video_dir: str, video_segments: dict) -> Path:
-        output_video_path = Path("/tmp/output_video.mp4")
+        output_video_path = Path("/tmp/video/output.avi")
+        os.makedirs("/tmp/video", exist_ok=True)
         frame_names = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg')])
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fourcc = cv2.VideoWriter_fourcc(*'MPEG') #*'mp4v'
         first_frame = cv2.imread(os.path.join(video_dir, frame_names[0]))
         height, width = first_frame.shape[:2]
+        
         out = cv2.VideoWriter(str(output_video_path), fourcc, 30, (width, height))
-
+        color_mask = np.concatenate([np.random.random(3), [0.35]])
+        
         for frame_idx, frame_name in enumerate(frame_names):
             frame_path = os.path.join(video_dir, frame_name)
             frame = cv2.imread(frame_path)
             
             if frame_idx in video_segments:
                 for obj_id, mask in video_segments[frame_idx].items():
-                    color_mask = np.concatenate([np.random.random(3), [0.35]])
+                    # Remove the extra dimension and ensure boolean type
+                    mask = mask.squeeze().astype(bool)
+                    # Ensure mask has the same dimensions as the frame
+                    if mask.shape != frame.shape[:2]:
+                        mask = cv2.resize(mask.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                        mask = mask.astype(bool)
+                    
+                    
                     frame[mask] = frame[mask] * (1 - color_mask[3]) + color_mask[:3] * 255 * color_mask[3]
-
-            out.write(frame)
+                    
+                    out.write(frame)
 
         out.release()
         return output_video_path
@@ -150,9 +182,36 @@ class Predictor(BasePredictor):
 
         for frame_idx, masks in video_segments.items():
             for obj_id, mask in masks.items():
-                mask_image = mask.astype(np.uint8) * 255
+                mask_image = mask.squeeze().astype(np.uint8) * 255
                 mask_path = Path(f"/tmp/individual_masks/frame_{frame_idx}_obj_{obj_id}.png")
                 Image.fromarray(mask_image).save(mask_path)
                 mask_paths.append(mask_path)
 
         return mask_paths
+    
+    def save_masked_frames(self, video_dir: str, video_segments: dict) -> List[Path]:
+        frame_paths = []
+        os.makedirs("/tmp/masked_frames", exist_ok=True)
+        frame_names = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg')])
+        color_mask = np.concatenate([np.random.random(3), [0.35]])
+        for frame_idx, frame_name in enumerate(frame_names):
+            frame_path = os.path.join(video_dir, frame_name)
+            frame = cv2.imread(frame_path)
+            
+            if frame_idx in video_segments:
+                for obj_id, mask in video_segments[frame_idx].items():
+                    # Remove the extra dimension and ensure boolean type
+                    mask = mask.squeeze().astype(bool)
+                    # Ensure mask has the same dimensions as the frame
+                    if mask.shape != frame.shape[:2]:
+                        mask = cv2.resize(mask.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                        mask = mask.astype(bool)
+                    
+                    
+                    frame[mask] = frame[mask] * (1 - color_mask[3]) + color_mask[:3] * 255 * color_mask[3]
+            
+            output_path = Path(f"/tmp/masked_frames/frame_{frame_idx:05d}.png")
+            cv2.imwrite(str(output_path), frame)
+            frame_paths.append(output_path)
+        
+        return frame_paths
