@@ -1,0 +1,17 @@
+{
+    "type": "object",
+    "title": "Output",
+    "required": [
+        "individual_masks"
+    ],
+    "properties": {
+        "individual_masks": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "format": "uri"
+            },
+            "title": "Individual Masks"
+        }
+    }
+}

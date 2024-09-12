@@ -1,0 +1,37 @@
+{
+    "type": "object",
+    "title": "Input",
+    "required": [
+        "video",
+        "points"
+    ],
+    "properties": {
+        "video": {
+            "type": "string",
+            "title": "Video",
+            "format": "uri",
+            "x-order": 0,
+            "description": "Input video file"
+        },
+        "points": {
+            "type": "string",
+            "title": "Points",
+            "x-order": 1,
+            "description": "Comma-separated list of x,y coordinates for positive points"
+        },
+        "object_id": {
+            "type": "integer",
+            "title": "Object Id",
+            "default": 1,
+            "x-order": 3,
+            "description": "Unique ID for the object to be tracked"
+        },
+        "negative_points": {
+            "type": "string",
+            "title": "Negative Points",
+            "default": "",
+            "x-order": 2,
+            "description": "Comma-separated list of x,y coordinates for negative points"
+        }
+    }
+}
